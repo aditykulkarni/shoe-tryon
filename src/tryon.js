@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { FilesetResolver, PoseLandmarker } from '@mediapipe/tasks-vision';
-import { coverMapper, footAnchor } from './lib/footPose.js';
+import { FOOT_LANDMARKS, coverMapper, footAnchor } from './lib/footPose.js';
 import { VectorFilter } from './lib/oneEuro.js';
 import { loadMeasurement } from './lib/storage.js';
 import { loadShoe } from './shoe.js';
@@ -12,16 +12,66 @@ const POSE_MODEL_URL =
 const DEFAULT_FOOT_MM = 265;
 // Extra length of the shoe over the foot, matching the sizing rule.
 const SHOE_ALLOWANCE_MM = 15;
+// Foot landmarks often come back with middling visibility; below this the
+// foot is treated as hidden.
+const MIN_FOOT_VISIBILITY = 0.3;
+
+async function createLandmarker() {
+  const vision = await FilesetResolver.forVisionTasks(WASM_URL);
+  const options = (delegate) => ({
+    baseOptions: { modelAssetPath: POSE_MODEL_URL, delegate },
+    runningMode: 'VIDEO',
+    numPoses: 1,
+  });
+  try {
+    return await PoseLandmarker.createFromOptions(vision, options('GPU'));
+  } catch (err) {
+    // Some mobile browsers cannot run the GPU delegate.
+    console.warn('GPU delegate failed, falling back to CPU', err);
+    return PoseLandmarker.createFromOptions(vision, options('CPU'));
+  }
+}
+
+// Draws every pose landmark, with the foot points larger, so it is clear
+// whether the model sees a person and where it thinks the feet are.
+function drawDebug(ctx, landmarks, toScreen) {
+  ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  if (!landmarks) return;
+  const dpr = window.devicePixelRatio;
+  landmarks.forEach((p, i) => {
+    const [x, y] = toScreen(p.x, p.y);
+    const foot = i >= 27;
+    const vis = p.visibility ?? 1;
+    ctx.fillStyle = foot ? (vis >= MIN_FOOT_VISIBILITY ? '#68d391' : '#fc8181') : 'rgba(255,255,255,0.7)';
+    ctx.beginPath();
+    ctx.arc(x * dpr, y * dpr, (foot ? 7 : 4) * dpr, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+const footVisibility = (landmarks, ids) =>
+  Math.min(...[ids.heel, ids.toe, ids.ankle].map((i) => landmarks[i]?.visibility ?? 0));
 
 export async function startTryOn(root) {
   root.innerHTML = `
     <div class="tryon">
       <video playsinline muted></video>
-      <canvas></canvas>
-      <div class="hud"><span class="status">Starting camera…</span></div>
+      <canvas class="scene"></canvas>
+      <canvas class="debug"></canvas>
+      <div class="hud">
+        <span class="status">Starting camera…</span>
+        <button type="button" class="debug-toggle">Hide points</button>
+      </div>
     </div>`;
   const video = root.querySelector('video');
-  const canvas = root.querySelector('canvas');
+  const canvas = root.querySelector('canvas.scene');
+  const debugCanvas = root.querySelector('canvas.debug');
+  const debugCtx = debugCanvas.getContext('2d');
+  const toggle = root.querySelector('.debug-toggle');
+  toggle.onclick = () => {
+    debugCanvas.hidden = !debugCanvas.hidden;
+    toggle.textContent = debugCanvas.hidden ? 'Show points' : 'Hide points';
+  };
   const status = root.querySelector('.status');
   const say = (text) => (status.textContent = text);
 
@@ -39,12 +89,14 @@ export async function startTryOn(root) {
   await video.play();
 
   say('Loading foot tracking…');
-  const vision = await FilesetResolver.forVisionTasks(WASM_URL);
-  const landmarker = await PoseLandmarker.createFromOptions(vision, {
-    baseOptions: { modelAssetPath: POSE_MODEL_URL, delegate: 'GPU' },
-    runningMode: 'VIDEO',
-    numPoses: 1,
-  });
+  let landmarker;
+  try {
+    landmarker = await createLandmarker();
+  } catch (err) {
+    say(`Foot tracking failed to load: ${err.message ?? err}`);
+    stream.getTracks().forEach((t) => t.stop());
+    return () => {};
+  }
 
   const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
   renderer.setPixelRatio(window.devicePixelRatio);
@@ -61,6 +113,8 @@ export async function startTryOn(root) {
     const w = root.clientWidth;
     const h = root.clientHeight;
     renderer.setSize(w, h, false);
+    debugCanvas.width = w * window.devicePixelRatio;
+    debugCanvas.height = h * window.devicePixelRatio;
     camera.right = w;
     camera.bottom = -h;
     camera.updateProjectionMatrix();
@@ -83,9 +137,9 @@ export async function startTryOn(root) {
     return { side, object, filter: new VectorFilter(12, { minCutoff: 1.2, beta: 0.01 }), mirror: side === 'left' ? -1 : 1 };
   });
 
-  say(
-    `${shoe.isPlaceholder ? 'Placeholder shoe' : 'Your shoe'} · foot ${footMm} mm${measured ? '' : ' (default, measure first)'} · point the camera at your feet`
-  );
+  const intro = `${shoe.isPlaceholder ? 'Placeholder shoe' : 'Your shoe'} · foot ${footMm} mm${measured ? '' : ' (default, measure first)'}`;
+  say(`${intro} · point the camera at your feet`);
+  let lastStatusAt = 0;
 
   const basis = new THREE.Matrix4();
   const scale = new THREE.Matrix4();
@@ -106,9 +160,11 @@ export async function startTryOn(root) {
     const landmarks = result.landmarks[0];
     const world = result.worldLandmarks[0];
     const toScreen = coverMapper(video.videoWidth, video.videoHeight, root.clientWidth, root.clientHeight);
+    if (!debugCanvas.hidden) drawDebug(debugCtx, landmarks, toScreen);
+    let tracked = 0;
 
     for (const foot of feet) {
-      const anchor = landmarks && world ? footAnchor(landmarks, world, foot.side, toScreen) : null;
+      const anchor = landmarks && world ? footAnchor(landmarks, world, foot.side, toScreen, MIN_FOOT_VISIBILITY) : null;
       if (!anchor) {
         foot.object.visible = false;
         foot.filter.reset();
@@ -125,8 +181,22 @@ export async function startTryOn(root) {
       scale.makeScale(s * foot.mirror, s, s);
       foot.object.matrix.multiplyMatrices(basis, scale);
       foot.object.visible = true;
+      tracked++;
     }
     renderer.render(scene, camera);
+
+    // Say what the tracker sees, a few times a second.
+    if (now - lastStatusAt > 300) {
+      lastStatusAt = now;
+      if (!landmarks) {
+        say(`${intro} · no person found: get your lower legs and feet in the frame`);
+      } else if (!tracked) {
+        const vis = ['left', 'right'].map((s) => footVisibility(landmarks, FOOT_LANDMARKS[s]).toFixed(2));
+        say(`${intro} · person found, feet unclear (visibility ${vis.join(' / ')}): step back so your shins show`);
+      } else {
+        say(`${intro} · tracking ${tracked === 2 ? 'both feet' : 'one foot'}`);
+      }
+    }
   };
   loop();
 

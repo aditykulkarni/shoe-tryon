@@ -4,16 +4,20 @@ import { saveMeasurement } from './lib/storage.js';
 
 const STEPS = [
   { key: 'corner', count: 4, prompt: 'Tap the four corners of the paper, in any order.' },
-  { key: 'heel', count: 1, prompt: 'Tap the back of your heel.' },
+  { key: 'heel', count: 1, prompt: 'Tap the very back of your heel, where it meets the paper.' },
   { key: 'toe', count: 1, prompt: 'Tap the tip of your longest toe.' },
-  { key: 'width', count: 2, prompt: 'Tap the two widest points across the ball of your foot.' },
+  {
+    key: 'width',
+    count: 2,
+    prompt: 'Tap the inside edge of your foot at the big-toe joint, then the outside edge at the little-toe joint (the widest part).',
+  },
 ];
 const COLORS = { corner: '#f6ad55', heel: '#68d391', toe: '#68d391', width: '#63b3ed' };
 
 export function startMeasure(root, { onDone }) {
   root.innerHTML = `
     <div class="measure">
-      <p class="lead">Put a sheet of paper on the floor against a wall. Stand on it with your heel touching the wall, then take a photo from directly above.</p>
+      <p class="lead">Put a sheet of paper flat on the floor. Stand on it barefoot or in thin socks, heel a couple of centimetres in from the edge, so paper shows all around your foot. Have someone take a photo from directly above (or lean over and hold the phone level over your foot). All four corners of the paper must be in the photo.</p>
       <div class="row">
         <label>Paper
           <select name="paper">
