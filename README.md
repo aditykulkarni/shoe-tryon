@@ -5,6 +5,10 @@ Mobile web app with two screens:
 - **Measure**: photograph your foot standing on a sheet of A4 or US Letter paper, tap the paper's corners and a few foot points, and get foot length, width and rule-of-thumb EU/US/UK sizes. The result is saved on the phone.
 - **Try on**: the rear camera runs MediaPipe Pose on-device, takes the heel, toe and ankle points of each foot, smooths them, and draws the shoe over the video with three.js, scaled to the measured foot.
 
+## Set up on Windows
+
+Step-by-step from a fresh PC: [docs/SETUP-WINDOWS.md](docs/SETUP-WINDOWS.md). The foot model's training code is in [training/](training/README.md).
+
 ## Run it on your phone
 
 ```sh
